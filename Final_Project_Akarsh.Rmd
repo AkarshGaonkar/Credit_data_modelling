@@ -1,0 +1,619 @@
+---
+title: "Final_Project"
+author: "Akarsh Gaonkar"
+date: "2025-04-19"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(ISLR)
+library(xgboost)
+library(caret)
+library(randomForest)
+library(neuralnet)
+library(dplyr)
+library(MASS)
+```
+
+
+```{r}
+default.of.credit.card.clients <- read.csv("~/Documents/Spring_2025/Data_410_(Advanced_ML)/Final_Project_410/default of credit card clients.csv", stringsAsFactors=TRUE)
+
+data <- default.of.credit.card.clients
+```
+
+
+Condensing the data set(making new features from existing features) and cleaning
+```{r}
+# Creating percentage paid columns and removing the payment_amt and bill
+library(dplyr)
+
+credit_data_new <- data %>%
+  mutate(
+    PERCENT_PAID1 = ifelse(BILL_AMT1 == 0, NA, PAY_AMT1 / BILL_AMT1),
+    PERCENT_PAID2 = ifelse(BILL_AMT2 == 0, NA, PAY_AMT2 / BILL_AMT2),
+    PERCENT_PAID3 = ifelse(BILL_AMT3 == 0, NA, PAY_AMT3 / BILL_AMT3),
+    PERCENT_PAID4 = ifelse(BILL_AMT4 == 0, NA, PAY_AMT4 / BILL_AMT4),
+    PERCENT_PAID5 = ifelse(BILL_AMT5 == 0, NA, PAY_AMT5 / BILL_AMT5),
+    PERCENT_PAID6 = ifelse(BILL_AMT6 == 0, NA, PAY_AMT6 / BILL_AMT6)
+  )
+
+# Explicitly list columns to remove (base R approach inside dplyr)
+columns_to_remove <- c("BILL_AMT1", "BILL_AMT2", "BILL_AMT3", 
+                       "BILL_AMT4", "BILL_AMT5", "BILL_AMT6",
+                       "PAY_AMT1", "PAY_AMT2", "PAY_AMT3", 
+                       "PAY_AMT4", "PAY_AMT5", "PAY_AMT6")
+
+# Remove columns
+credit_data_cleaned <- credit_data_new %>%
+  dplyr::select(-(columns_to_remove))
+  
+#The above creates NA values for months where the bill amount and paid amount
+# is 0, hence replacing the values with 1's
+
+credit_data_new <- credit_data_cleaned |>
+  mutate(
+    across(
+      starts_with("PERCENT_PAID"),
+      ~ ifelse(is.na(.x), 1, .x)
+    )
+  )
+
+```
+
+#Now we have a fair baseline dataset to work with and test ML models.
+
+#Splitting into training and testing
+```{r}
+#converting categorical variables to factors
+credit_data_new$SEX <- as.factor(credit_data_new$SEX)
+credit_data_new$EDUCATION <- as.factor(credit_data_new$EDUCATION)
+credit_data_new$MARRIAGE <- as.factor(credit_data_new$MARRIAGE)
+credit_data_new$default.payment.next.month <- 
+  as.factor(credit_data_new$default.payment.next.month)
+
+credit_data_new <- credit_data_new[,-1]
+
+set.seed(123)
+train_indices <- sample(1:nrow(credit_data_new) ,
+                        size = 0.75 * nrow(credit_data_new) )  
+
+# Create training and testing sets
+credit_train <- credit_data_new[train_indices, ]
+credit_test  <- credit_data_new[-train_indices, ]
+
+```
+
+##Linear Regression Models
+
+#i)Full regression model
+```{r}
+full_lm <- lm(LIMIT_BAL ~ ., data = credit_train)
+
+preds <- predict(full_lm, credit_test)
+
+rmse <- sqrt(mean((credit_test$LIMIT_BAL - preds)^2))
+print(rmse)
+
+plot(full_lm)
+```
+Linear regression makes the assumption that the changes in the dependent 
+variable can be modeled as a monotonic linear function of the independent
+variables; that is, we assume that a change of a certain amount in the 
+independent variables will result in a change in the dependent variable, 
+and the amount of change in the dependent variable is constant across the 
+range of the independent variables.
+
+Citation:
+(https://www.stat.berkeley.edu/~s133/Lr-a.html#:~:
+text=Linear%20regression%20makes%20the%20assumption,
+the%20amount%20of%20change%20in)
+
+From plotting the full model we have above, we see that the fitted values 
+do not follow the assumption of a linear model that the relationship between the
+input and output variable is constant throughout the range of values. We can
+say this from the residual plot and the qq-plot.
+
+
+# ii) Ridge regression
+```{r}
+
+library(glmnet)
+options(scipen=999)
+
+# Prepare predictors and response
+x <- model.matrix(LIMIT_BAL ~ ., data = credit_data_new)[, -1] # Remove intercept column
+y <- credit_data_new$LIMIT_BAL
+
+# Define lambda grid for Ridge (same as Lasso for consistency)
+grid <- 10^seq(10, -10, length = 100) # From 100 to 0.01
+
+set.seed(1)
+# Split into training and test sets for validation
+train <- sample(1:nrow(x), 0.8 * nrow(x)) # 80% training
+test <- (-train)
+y_test <- y[test]
+
+# Fit ridge model on training set
+ridge_model <- glmnet(x[train,], y[train], alpha = 0, lambda = grid)
+
+# Cross-validation
+cv_out_ridge <- cv.glmnet(x[train,], y[train], alpha = 0, lambda = grid)
+best_lambda_ridge <- cv_out_ridge$lambda.min
+
+plot(ridge_model, xvar = "lambda", label=TRUE)
+
+plot(cv_out_ridge) # Plot CV error vs. log(lambda)
+
+# Test error (RMSE)
+ridge_pred <- predict(ridge_model, s = 1353, newx = x[test,])
+test_error_ridge <- sqrt(mean((ridge_pred - y_test)^2))
+
+# Coefficients
+ridge_coef <- predict(ridge_model, type = "coefficients", s = best_lambda_ridge)
+
+# Results
+print("Test RMSE (Ridge):")
+print(test_error_ridge)
+
+#RMSE is 116581
+```
+
+Ridge regression improves upon an ordinary RSS (Residual Sum of Squares) model 
+by adding a regularization term to the loss function. While an RSS model only
+minimizes the sum of squared residuals, ridge regression minimizes the RSS plus
+a penalty proportional to the sum of the squared coefficients 
+(controlled by a tuning parameter lambda). This "shrinkage" effect pulls the 
+coefficients closer to zero without setting them exactly to zero. The key
+advantage is that ridge regression reduces variance dramatically, especially
+when predictors are highly correlated or when the number of predictors is large 
+relative to the number of observations. Although it introduces a small amount of
+bias, this trade-off often leads to lower test error and more stable predictions
+compared to ordinary least squares (RSS). Ridge regression also prevents 
+overfitting, whereas an RSS model can suffer from extremely high variance 
+and unstable coefficients, particularly when predictors are multicollinear.
+Citation: shrinkage notes
+
+
+# iii) Lasso regression
+```{r}
+
+library(glmnet)
+options(scipen=999)
+
+# Prepare predictors and response
+x <- model.matrix(LIMIT_BAL ~ ., data = credit_data_new)[, -1] # Remove intercept column
+y <- credit_data_new$LIMIT_BAL
+
+# Define lambda grid for Ridge (same as Lasso for consistency)
+grid <- 10^seq(10, -10, length = 100) # From 100 to 0.01
+
+# Split into training and test sets for validation
+set.seed(1)
+train <- sample(1:nrow(x), 0.8 * nrow(x)) # 80% training
+test <- (-train)
+y_test <- y[test]
+
+# Fit ridge model on training set
+lasso_model <- glmnet(x[train,], y[train], alpha = 1, lambda = grid)
+
+# Cross-validation
+cv_out_lasso <- cv.glmnet(x[train,], y[train], alpha = 1, lambda = grid)
+best_lambda_lasso <- cv_out_lasso$lambda.min
+
+plot(lasso_model, xvar = "lambda", label=TRUE)
+
+plot(cv_out_lasso) # Plot CV error vs. log(lambda)
+
+# Test error (RMSE)
+lasso_pred <- predict(lasso_model, s = 335, newx = x[test,])
+test_error_lasso <- sqrt(mean((lasso_pred - y_test)^2))
+
+# Coefficients
+lasso_coef <- predict(lasso_model, type = "coefficients", s = best_lambda_lasso)
+
+# Results
+print("Test RMSE (Lasso):")
+print(test_error_lasso)
+
+#RMSE is 116505
+```
+Lasso regression improves predictive modeling by adding a penalty to the 
+absolute values of the coefficients. It minimizes the residual sum of squares 
+by including absolute value of the penalty term.
+This penalty shrinks some coefficients exactly to zero, allowing Lasso to 
+perform automatic feature selection. In contrast, Ridge regression adds an L2 
+penalty: (includes square of penalty term), which shrinks coefficients toward 
+zero but never exactly zero. Ridge keeps all predictors, making it more suitable
+when many variables have moderate importance. Lasso works best when only a small
+subset of predictors is truly relevant and when model simplicity is a goal. Both
+methods balance the bias-variance trade-off, reducing overfitting compared to a
+reular linear model. Cross-validation is typically used to select the 
+tuning parameter Lambda. In short, Lasso shrinks and pushes low impact variables
+to 0, while Ridge shrinks but keeps all predictors. Hence Lasso models also tend 
+to be computationally light. Also, we see that the
+
+#iv) Random Forest
+```{r}
+# Load library
+library(randomForest)
+library(caret)
+x_train <- model.matrix(LIMIT_BAL ~., data = credit_train)[,-1]
+x_test <- model.matrix(LIMIT_BAL ~., data = credit_test)[,-1]
+
+y_train <- credit_train$LIMIT_BAL
+y_test <- credit_test$LIMIT_BAL
+```
+
+```{r}
+rf_grid <- expand.grid(mtry=c(2,4,6))
+
+train_control <- trainControl(
+  method = "cv",
+  number = 3,
+  verboseIter = F,
+  allowParallel = T
+)
+
+```
+
+```{r}
+set.seed(123)
+rf_model <- train(
+  x=x_train,
+  y=y_train,
+  method="rf",
+  tuneGrid=rf_grid,
+  trControl=train_control,
+  importance=T
+)
+```
+
+```{r}
+rf_model$bestTune
+# mtry = 4 is the best
+
+rf_model <- randomForest(LIMIT_BAL ~., mtry=4, data = credit_train)
+rf_pred <- predict(rf_model,credit_test)
+
+
+rmse <- sqrt(mean((rf_pred - y_test)^2))
+rmse
+# RMSE is 106807 with mtry=4
+
+```
+Random Forest Regression is a powerful and flexible modeling technique that makes
+very few assumptions about the underlying data. It does not assume linearity, 
+normality, or constant variance, making it ideal for complex, real-world 
+datasets. Its strengths include handling nonlinear relationships, 
+high-dimensional data, multicollinearity, and outliers naturally, while also 
+providing automatic measures of feature importance. Random Forests reduce 
+overfitting by averaging many decision trees, leading to strong predictive 
+performance. However, they are considered "black box" models, meaning their 
+internal decision-making is hard to interpret. They can also be computationally 
+intensive, especially with large datasets or many trees, and they are not good
+at extrapolating beyond the range of training data. Additionally, they may show 
+a bias toward predictors with many possible split points. Overall, Random Forest
+Regression is an excellent choice when prediction accuracy is more important 
+than model interpretability, particularly for messy or highly nonlinear data.
+
+
+# v) XGBoost
+```{r}
+xgb_grid <- expand.grid(
+  nrounds = c(200, 400),
+  max_depth = c(2, 4),
+  eta = c(0.1,0.2),
+  gamma = c(0.1, 0.2),
+  colsample_bytree = 1,
+  min_child_weight = 1,
+  subsample = 1
+  )
+
+#train control
+xgb_control <- trainControl(
+  method = "cv",
+  number = 3,
+  verboseIter = FALSE,
+  allowParallel = TRUE
+)
+
+# train model
+set.seed(123)
+xgb_tuned <- train(
+  x = x_train,
+  y = y_train,
+  method = "xgbTree",
+  trControl = xgb_control,
+  tuneGrid = xgb_grid,
+  verbose = FALSE
+)
+
+xgb_tuned$bestTune #best tune
+
+train_control <- trainControl(method="none",
+                              verboseIter = TRUE,
+                              allowParallel = TRUE)
+
+final_grid <- expand.grid(
+  nrounds = xgb_tuned$bestTune$nrounds,
+  max_depth = xgb_tuned$bestTune$max_depth,
+  eta = xgb_tuned$bestTune$eta,
+  gamma = xgb_tuned$bestTune$gamma,
+  colsample_bytree = xgb_tuned$bestTune$colsample_bytree,
+  min_child_weight = xgb_tuned$bestTune$min_child_weight,
+  subsample = xgb_tuned$bestTune$subsample
+)
+
+xgb_model <- train(
+  x = x_train,
+  y = y_train,
+  method = "xgbTree",
+  trControl = train_control,
+  tuneGrid = final_grid,
+  verbose = FALSE
+)
+
+xgb_preds <- predict(xgb_tuned, newdata = x_test) #preds on test set
+
+rmse_xgb <- sqrt(mean((xgb_preds - y_test)^2)) #rmse
+rmse_xgb
+
+importance <- varImp(xgb_model)
+plot(importance)
+#RMSE is 106852
+```
+XGBoost (extreme Gradient Boosting) is an advanced machine learning algorithm 
+based on the gradient boosting framework. It belongs to a family of ensemble 
+methods, which combine multiple weak models—typically decision trees—into a 
+single, stronger model. Unlike traditional models like decision trees and 
+random forests that are easier to interpret but may struggle with complex 
+datasets, XGBoost is optimized for accuracy, speed, and scalability. It builds 
+decision trees sequentially, where each new tree is trained to correct the 
+errors of the previous one. The process begins with a base learner (often 
+predicting the mean in regression tasks), followed by calculating residuals 
+or errors. The next tree then focuses on learning from those residuals. This 
+cycle continues until a stopping condition is met, such as a maximum number 
+of trees or minimal improvement. XGBoost includes built-in regularization, 
+parallel processing, and support for custom loss functions, making it efficient
+and highly tunable for different tasks. The final prediction is a weighted sum 
+of predictions from all individual trees. Due to its robustness and high 
+performance, XGBoost is widely used in machine learning competitions and 
+real-world applications involving structured data. It consistently outperforms 
+many traditional models when tuned correctly. The above XGboost model does a 
+little worse as compared to the random forest model. But it is probably because
+the random forest model is tuned to its best form and ties the performance of the 
+boosted model.
+citation: https://www.geeksforgeeks.org/xgboost/
+
+# i) Logistic Regression models to predict default or not
+```{r}
+
+
+# Separate test set into predictors and labels
+x_test <- credit_test[, names(credit_test) != "default.payment.next.month"]
+y_test <- credit_test$default.payment.next.month
+
+# Fit logistic regression model on training data
+logit_model <- glm(default.payment.next.month ~ ., data = credit_train, family = "binomial")
+
+# Predict on test set using only predictors
+test_probs <- predict(logit_model, newdata = x_test, type = "response")
+
+# Convert probabilities to class labels (threshold = 0.5)
+test_pred <- ifelse(test_probs > 0.43, 1, 0)
+test_pred <- factor(test_pred, levels = levels(y_test))  # Ensure factor level alignment
+
+# Confusion matrix and accuracy
+confusion <- table(Predicted = test_pred, Actual = y_test)
+print(confusion)
+
+accuracy <- mean(test_pred == y_test)
+accuracy
+
+confusionMatrix(test_pred,y_test)
+
+
+# kappa is 0.36
+# balanced accuracy is 0.65
+```
+This logistic model has a accuracy of 82.4% with a slightly adjusted threshold.
+Intuitively, the logistic function models the probability of a data point 
+belonging to class with label 1. The reason for that is that the output of the 
+logistic function is bounded between 0 and 1, and we want our model to capture 
+the probability of a feature having a specific label. For instance, after we 
+have trained logistic regression, we obtain the output of the logistic function 
+for a new data point. If the value of the output is greater than 0.5, we 
+classify it with label 1; otherwise, we classify it with label 0
+
+# ii) SVM (Support vector machines, linear kernel)
+```{r}
+library(e1071)
+library(caret)
+
+svmfit <- svm(default.payment.next.month ~.,credit_train, 
+kernel="linear", cost=1)
+
+set.seed(50)
+# # tune_out <- tune(svm, default.payment.next.month ~.,data=credit_train, kernel="linear",
+# #                  ranges=list(cost=c(0.1,1)))
+# 
+# tune_out$best.parameters
+# #according to tune_out, 1 is the best cost value
+svmfit <- svm(default.payment.next.month ~.,data=credit_train, kernel="linear",  cost=1,grid=100)
+
+y_pred <- predict(svmfit, newdata = x_test)
+table <- table(y_test, y_pred)
+table
+accuracy <- sum(diag(table))/sum(table)
+accuracy
+
+confusionMatrix(y_test,y_pred)
+#accuracy of the linear kernel SVM is 81.2, 
+#kappa is 0.27, balanced accuracy is 0.75
+```
+SVMs are almost like the opposite of PCA, they expand the dimensionality of
+the data passed to them to be able to classify it using hyperplanes. A linear kernel SVM is a simple version of a support vector machine that 
+classifies data based on a simple 2D hyperplane. The above code runs a cross
+validation to find the right linear SVM based on the right cost value and 
+uses the model to predict if a person defaults their credit card balance.
+
+# iii) SVM (Support vector machines, radial kernel)
+```{r}
+library(e1071)
+library(leaps)
+library(caret)
+x_test <- credit_test[, names(credit_test) != "default.payment.next.month"]
+y_test <- credit_test$default.payment.next.month
+
+# subset_model <- regsubsets(default.payment.next.month ~ ., 
+#                            data = credit_train, 
+#                            nvmax = 10, # Maximum number of predictors in a subset
+#                           method = "exhaustive")
+
+svmfit <- svm(default.payment.next.month~LIMIT_BAL+SEX+AGE+PAY_0+
+                        PAY_2+PAY_3+PERCENT_PAID1,credit_train, 
+kernel="radial", cost=1, gamma=10)
+
+set.seed(50)
+# tune_out <- tune(svm, default.payment.next.month~LIMIT_BAL+SEX+AGE+PAY_0+
+#                         PAY_2+PAY_3+PAY_4+PAY_5+PAY_6+PERCENT_PAID1,,data=credit_train, kernel="radial",
+#                  ranges=list(cost=c(0.1,1,10)), gamma = c(0.5,1,2,4))
+#after tuning the best cost value was found to be 1 and gamma was 4
+
+#tune_out$best.parameters
+#according to tune_out, 1 is the best cost value
+svmfit_radial <- svm(default.payment.next.month~LIMIT_BAL+SEX+AGE+PAY_0+
+                    PAY_2+PAY_3+PERCENT_PAID1,data=credit_train, kernel="radial",
+                    cost=1, gamma = 4,grid=10)
+
+y_pred <- predict(svmfit_radial, newdata = x_test)
+table <- table(y_test, y_pred)
+table
+accuracy <- sum(diag(table))/sum(table)
+accuracy
+
+confusionMatrix(y_test,y_pred)
+#accuracy is 81.64%, kappa value: 0.32, balanced accuracy is 0.74
+```
+The radial kernel for the SVM is a more complex hyperplane used to classify data
+as compared to the linear hyperplane. The radial hyperplane has the advantage of 
+capturing non linear relationships between input and output variables. It also has an extra parameter called gamma. The higher the gamma value, the more variance it can capture.
+
+# iv) LDA (linear discriminant analysis)
+```{r}
+library(caret)
+library(MASS)
+lda_model <- lda(default.payment.next.month ~ ., data = credit_train)
+
+x_test <- credit_test[, names(credit_test) != "default.payment.next.month"]
+y_test <- credit_test$default.payment.next.month
+
+
+predictions <- predict(lda_model, newdata = x_test)$class
+
+table <- table(predictions, y_test)
+table
+lda_accuracy <- sum(diag(table)) / sum(table)
+lda_accuracy
+
+confusionMatrix(predictions, y_test)
+#The lda accuracy is 81.6%, kappa is 0.2829, balanced accuracy is 0.60
+```
+Both LDA and QDA assume the the predictor variables X are drawn from a multivariate distribution.
+LDA assumes equality of covariances among the predictor variables X across each all levels of Y. This assumption is relaxed with the QDA model.
+LDA and QDA require the number of predictor variables (p) to be less then the sample size (n). Furthermore, its important to keep in mind that performance will severely decline as p approaches n.
+citation: https://uc-r.github.io/discriminant_analysis
+
+
+# v) Neural Nets
+
+```{r}
+library(dplyr)
+library(leaps)
+# Step 1: Remove the factor/categorical variables
+credit_data_factors <- credit_data_new[, c("SEX", "EDUCATION", "MARRIAGE","default.payment.next.month")]
+
+credit_data_factors$SEX <- as.numeric(credit_data_factors$SEX)
+credit_data_factors$EDUCATION <- as.numeric(credit_data_factors$EDUCATION)
+credit_data_factors$MARRIAGE <- as.numeric(credit_data_factors$MARRIAGE)
+
+credit_data_numeric <- credit_data_new[, !(names(credit_data_new) %in% c("SEX", "EDUCATION", "MARRIAGE","default.payment.next.month"))]
+
+# Step 2: Scale and center the numeric variables
+credit_data_scaled <- as.data.frame(scale(credit_data_numeric))  # centers and scales
+
+# Step 3: Add the removed variables back
+credit_data_norm <- cbind(credit_data_scaled, credit_data_factors)
+
+```
+
+
+```{r}
+library(neuralnet)
+library(caret)
+library(leaps)
+n <- nrow(credit_data_norm)
+set.seed(123)
+train_idx <- sample(1:n, size = 0.75 * n)
+credit_data_norm$default.payment.next.month <- 
+  as.factor(credit_data_norm$default.payment.next.month)
+train_data <- credit_data_norm[train_idx, ]
+test_data  <- credit_data_norm[-train_idx, ]
+test_x <- test_data[, !(names(test_data) %in% c("default.payment.next.month"))] 
+test_y <- credit_test$default.payment.next.month
+
+subset_model <- regsubsets(default.payment.next.month ~ ., 
+                           data =train_data, 
+                           nvmax = 10, # Maximum number of predictors in a subset
+                           method = "exhaustive")
+
+
+# Build formula for neuralnet
+
+
+# Train neural net with 2 hidden layers (e.g., 5)
+nn_model <- neuralnet(default.payment.next.month~LIMIT_BAL+SEX+AGE+PAY_0+PAY_2+
+                        PAY_3+PERCENT_PAID1, 
+                      data = train_data, 
+                      hidden = c(5), 
+                      stepmax = 1e4,
+                      threshold = 0.1,
+                      linear.output = FALSE,
+                      lifesign="minimal")
+
+# Plot the neural network
+#plot(nn_model)
+
+# Predict on test data (returns probabilities)
+nn_predictions <- neuralnet::compute(nn_model, test_x)$net.result
+
+# Convert to class labels (threshold 0.5)
+test_preds_factor <- apply(nn_predictions, MARGIN = 1, which.max)
+test_preds_factor <- ifelse(test_preds_factor == 1, 0, 1)
+test_preds_factor <- as.factor(test_preds_factor)
+# Confusion matrix
+conf_mat <- table(Predicted = test_preds_factor, Actual = test_y)
+
+# Accuracy
+sum(diag(conf_mat))/sum(conf_mat)
+# Accuracy for the nn model is 83%
+# kappa value is 0.37
+
+confusionMatrix(test_preds_factor,test_y)
+
+plot(nn_model)
+```
+A neural network is a machine learning program, or model, that makes decisions 
+in a manner similar to the human brain, by using processes that mimic the way
+biological neurons work together to identify phenomena, weight options and 
+arrive at conclusions.Every neural network consists of layers of nodes or 
+artificial neurons, an input layer, one or more hidden layers, and an output layer. 
+Each node connects to others, and has its own associated weight and threshold. 
+If the output of any individual node is above the specified threshold value, 
+that node is activated, sending data to the next layer of the network. 
+Otherwise, no data is passed along to the next layer of the network.
